@@ -1,40 +1,37 @@
 // @version=5
 // ---
-// Oryens Capital - Modular Strategy Framework v1.7
+// Oryens Capital - Modular Strategy Framework v1.9
 //
 // This script is a complete, modular framework for a trend-following
 // strategy. It is designed for clarity, maintainability, and
 // "plug-and-play" logic, per your engineering requirements.
 //
-// v1.7: CATASTROPHIC BUG FIX
-//       - The 'stopLossLevel' and 'takeProfitLevel' variables were
-//         never being reset after the first trade due to a
-//         flawed 'if (notInTrade)' check inside an 'else' block.
-//       - This caused all subsequent trades to use stale data,
-//         likely resulting in immediate, invisible exits.
-//       - The logic in Module 5 has been rebuilt to be robust.
-//       - Per user feedback, Module 6 'plotshape' now only fires
-//         on an actual trade entry, not just a signal.
+// v1.9: "LET WINNERS RUN" UPGRADE
+//       - The strategy is now a true trend-following system.
+//       - REMOVED: Fixed Take Profit (`i_tpMult`).
+//       - REMOVED: Signal-based exit (`exitBuySignal`).
+//       - ADDED: Trailing ATR Stop-Loss.
+//       - The stop-loss is now calculated on every bar and can
+//         only move *in favor* of the trade, allowing the
+//         strategy to ride long trends and lock in profit.
 //
-// STRATEGY LOGIC: (REVISED AND FUNCTIONAL)
+// STRATEGY LOGIC: (REVISED AND PROFESSIONAL)
 // 1. REGIME FILTER: 200-period EMA.
 // 2. ENTRY SIGNAL: MACD Crossover (Regime-filtered).
-// 3. EXIT SIGNAL (TWO CONDITIONS):
-//    - A) SIGNAL REVERSAL: MACD crosses back over the signal line.
-//    - B) RISK MANAGEMENT: An ATR-based Stop Loss or Take Profit is hit.
+// 3. EXIT SIGNAL: Trailing ATR Stop-Loss is hit.
 // ---
 
 // ---
 // MODULE 1: STRATEGY CONFIGURATION
 // ---
-strategy("Oryens - Modular Trend Strategy v1.7 (Logic Fix)",
+strategy("Oryens - Modular Trend Strategy v1.9 (Trailing ATR)",
      overlay=true,
      initial_capital=100000,
-     default_qty_type=strategy.percent_of_equity,
-     default_qty_value=10, // Uses 10% of equity per trade
+     default_qty_type=strategy.fixed,
+     default_qty_value=1, // Trade 1 contract
      commission_type=strategy.commission.percent,
      commission_value=0.04, // Simulates 0.04% exchange fees
-     pyramiding=0, // No pyramiding for this first version
+     pyramiding=0,
      calc_on_every_tick=true
      )
 
@@ -48,7 +45,8 @@ i_macdSlow  = input.int(26, "MACD Slow", group=G_INPUTS)
 i_signalLen = input.int(9, "MACD Signal", group=G_INPUTS)
 i_atrLen    = input.int(14, "ATR Length", group=G_INPUTS)
 i_stopMult  = input.float(2.0, "ATR Stop Multiplier", step=0.1, group=G_INPUTS)
-i_tpMult    = input.float(4.0, "ATR T/P Multiplier", step=0.1, group=G_INPUTS)
+// v1.9: Removed Take Profit. We let winners run.
+// i_tpMult    = input.float(4.0, "ATR T/P Multiplier", step=0.1, group=G_INPUTS)
 
 // ---
 // MODULE 3: INDICATOR CALCULATIONS
@@ -73,22 +71,25 @@ f_getSignals(ema, macd, signal) =>
 
     bool enterLong  = isBullRegime and macdCrossUp
     bool enterShort = isBearRegime and macdCrossDown
-    bool exitLongSignal   = macdCrossDown
-    bool exitShortSignal  = macdCrossUp
     
-    [enterLong, exitLongSignal, enterShort, exitShortSignal, isBullRegime]
+    // v1.9: Removed signal-based exits.
+    // bool exitLongSignal   = macdCrossDown
+    // bool exitShortSignal  = macdCrossUp
+    
+    [enterLong, enterShort, isBullRegime]
 
-[buySignal, exitBuySignal, sellSignal, exitSellSignal, isBullRegime] = f_getSignals(regimeEMA, macdLine, signalLine)
+[buySignal, sellSignal, isBullRegime] = f_getSignals(regimeEMA, macdLine, signalLine)
 
 
 // ---
-// MODULE 5: RISK MANAGEMENT & EXECUTION (REBUILT)
-// This module now correctly resets SL/TP levels.
+// MODULE 5: RISK MANAGEMENT & EXECUTION (TRAILING STOP LOGIC)
+// This module now implements a trailing ATR stop.
 // ---
 
 // We use 'var' to declare variables that *persist* between bars.
-var float stopLossLevel   = na
-var float takeProfitLevel = na
+var float stopLossLevel = na
+// v1.9: Removed takeProfitLevel
+// var float takeProfitLevel = na
 
 // Get current trade state
 bool inLongTrade  = strategy.position_size > 0
@@ -96,56 +97,58 @@ bool inShortTrade = strategy.position_size < 0
 bool notInTrade   = strategy.position_size == 0
 
 // === 1. DETECT STATE CHANGES ===
-// These booleans are true for *one tick only*
 bool justEnteredLong  = inLongTrade and strategy.position_size[1] <= 0
 bool justEnteredShort = inShortTrade and strategy.position_size[1] >= 0
 bool justClosedTrade  = notInTrade and strategy.position_size[1] != 0
 
-// === 2. RESET LEVELS ON EXIT ===
-// If we *just* closed a trade, reset the SL/TP variables to 'na'
-// This was the source of the catastrophic bug.
-if (justClosedTrade)
-    stopLossLevel   := na
-    takeProfitLevel := na
-
-// === 3. CALCULATE & STORE LEVELS ON ENTRY ===
-// If we *just* entered a trade, calculate and store the new SL/TP
+// === 2. RESET/CALCULATE INITIAL STOP ON ENTRY ===
+// If we *just* entered, set the *initial* stop loss.
 if (justEnteredLong)
-    stopLossLevel   := close - (atrValue * i_stopMult)
-    takeProfitLevel := close + (atrValue * i_tpMult)
+    stopLossLevel := close - (atrValue * i_stopMult)
 
 if (justEnteredShort)
-    stopLossLevel   := close + (atrValue * i_stopMult)
-    takeProfitLevel := close - (atrValue * i_tpMult)
+    stopLossLevel := close + (atrValue * i_stopMult)
 
-// === 4. ENTRY LOGIC ===
+// === 3. UPDATE TRAILING STOP (The "Engine") ===
+// This logic runs on *every bar* a trade is open.
+if (inLongTrade)
+    // Calculate the *new* potential stop level
+    float newStop = close - (atrValue * i_stopMult)
+    // If the newStop is higher than our old stop, update it.
+    // This makes the stop "trail" the price up.
+    stopLossLevel := math.max(stopLossLevel, newStop)
+
+if (inShortTrade)
+    // Calculate the *new* potential stop level
+    float newStop = close + (atrValue * i_stopMult)
+    // If the newStop is lower than our old stop, update it.
+    // This makes the stop "trail" the price down.
+    stopLossLevel := math.min(stopLossLevel, newStop)
+
+// === 4. RESET STOP LEVEL ON EXIT ===
+// If we *just* closed a trade, reset the stop level for the next trade.
+if (justClosedTrade)
+    stopLossLevel := na
+
+// === 5. ENTRY LOGIC ===
 // We only check for entries if we are flat (notInTrade).
 if (notInTrade)
     if (buySignal)
-        strategy.entry("Long", strategy.long) // SL/TP levels will be set on next tick
+        strategy.entry("Long", strategy.long) // SL will be set on next tick
 
     if (sellSignal)
-        strategy.entry("Short", strategy.short) // SL/TP levels will be set on next tick
+        strategy.entry("Short", strategy.short) // SL will be set on next tick
 
-// === 5. EXIT LOGIC ===
-// This logic runs on *every bar* while a trade is open.
-
-// A. Signal-Based Exit (MACD Crossover Reversal)
-if (inLongTrade and exitBuySignal)
-    strategy.close("Long", comment="Exit (Signal)")
-
-if (inShortTrade and exitSellSignal)
-    strategy.close("Short", comment="Exit (Signal)")
-
-// B. Risk-Based Exit (ATR Stop Loss or Take Profit)
+// === 6. EXIT LOGIC ===
+// We now have only ONE exit condition: the trailing stop.
 // We place this exit order on *every bar* the trade is open,
-// using the SL/TP levels we stored in our 'var' variables.
-// This is now safe because the levels are correctly calculated.
+// using the *updated* 'stopLossLevel' variable.
+
 if (inLongTrade)
-    strategy.exit("Long SL/TP", "Long", stop=stopLossLevel, limit=takeProfitLevel)
+    strategy.exit("Long Exit", "Long", stop=stopLossLevel)
 
 if (inShortTrade)
-    strategy.exit("Short SL/TP", "Short", stop=stopLossLevel, limit=takeProfitLevel)
+    strategy.exit("Short Exit", "Short", stop=stopLossLevel)
 
 
 // ---
@@ -159,12 +162,11 @@ plot(regimeEMA, "Regime EMA", color.new(color.white, 50), 2)
 bgcolor(isBullRegime ? color.new(color.blue, 90) : color.new(color.red, 90))
 
 // Plot Buy/Sell signals
-// v1.7: Per user request, plotshape only fires on *actual trade entry*
-// using the 'justEnteredLong/Short' variables from Module 5.
 plotshape(justEnteredLong, "Long Entry", shape.labelup, location.belowbar, color.new(color.green, 0), size=size.small, text="BUY")
 plotshape(justEnteredShort, "Short Entry", shape.labeldown, location.abovebar, color.new(color.red, 0), size=size.small, text="SELL")
 
-// Plot the SL and TP levels on the chart *while in a trade*
-plot(inLongTrade or inShortTrade ? stopLossLevel : na, "Stop Loss", color.new(color.red, 0), 2, plot.style_linebr)
-plot(inLongTrade or inShortTrade ? takeProfitLevel : na, "Take Profit", color.new(color.green, 0), 2, plot.style_linebr)
+// Plot the Trailing Stop Loss
+plot(inLongTrade or inShortTrade ? stopLossLevel : na, "Trailing Stop Loss", color.new(color.red, 0), 2, plot.style_linebr)
+// v1.9: Removed Take Profit plot
+// plot(inLongTrade or inShortTrade ? takeProfitLevel : na, "Take Profit", color.new(color.green, 0), 2, plot.style_linebr)
 
