@@ -1,0 +1,271 @@
+// @version=5
+// ---
+// Oryens Capital - Fractal Strategy Engine v3.5
+//
+// v3.5: "THE 'GET PROFESSIONAL' FIX (v3.5)"
+//       - User's screenshot shows a -111% P&L. A catastrophic failure.
+//       - CAUSE: My logic in v3.4 was the *exact opposite* of the user's
+//         6-point plan. I was exiting on local whipsaw (`strategy.close`)
+//         instead of "holding through the whipsaw" as requested.
+//
+//       - THE FIX (Oryens Engineering Standard):
+//         1. DELETED (Module 7e): Ripped out the `strategy.close()` calls.
+//            This is the main fix. The strategy will no longer exit on
+//            local noise.
+//
+//         2. UPGRADED (Module 7b): "BUY-THE-DIP" ENGINE (Point #5).
+//            Instead of buying *anytime* the trend is up, the strategy
+//            now waits for a local pullback (hma1 < hma3) and
+//            buys the *recovery* (ta.crossover(hma1, hma3)).
+//
+//         3. UPGRADED (Module 1): Enabled `pyramiding=3` to allow the
+//            "buy-the-dip" logic to add to winning positions.
+//
+//         4. RETAINED: The Trailing ATR Stop is now the *only* exit,
+//            correctly implementing "let your winners run".
+// ---
+
+// ---
+// MODULE 1: STRATEGY CONFIGURATION
+// ---
+strategy("Oryens - Fractal Strategy v3.5 (Pro Engine)",
+     shorttitle="Oryens v3.5",
+     overlay=true,
+     initial_capital=100000,
+     default_qty_type=strategy.fixed,
+     default_qty_value=1, // Trade 1 contract
+     commission_type=strategy.commission.percent,
+     commission_value=0.04,
+     pyramiding=3, // v3.5: Enabled pyramiding
+     calc_on_every_tick=true
+     )
+
+// ---
+// MODULE 2: INPUTS
+// ---
+
+var G_HMA = "--- 1. HMA Rainbow (Current TF) ---"
+i_hmaLen1 = input.int(9, "HMA 1 (Fastest/Price)", group=G_HMA)
+i_hmaLen2 = input.int(21, "HMA 2", group=G_HMA)
+i_hmaLen3 = input.int(50, "HMA 3 (Medium)", group=G_HMA)
+i_hmaLen4 = input.int(100, "HMA 4", group=G_HMA)
+i_hmaLen5 = input.int(200, "HMA 5 (Slowest)", group=G_HMA)
+
+var G_MTF = "--- 2. MTF Trend Dashboard (Point #3) ---"
+i_tf1 = input.timeframe("1", "Trend 1 (e.g., 1m)", group=G_MTF)
+i_tf2 = input.timeframe("10", "Trend 2 (e.g., 10m)", group=G_MTF)
+i_tf3 = input.timeframe("60", "Trend 3 (e.g., 1H)", group=G_MTF)
+i_tf4 = input.timeframe("240", "Trend 4 (e.g., 4H)", group=G_MTF)
+i_tf5 = input.timeframe("D", "Trend 5 (e.g., Daily)", group=G_MTF)
+i_tf6 = input.timeframe("W", "Trend 6 (e.g., Weekly)", group=G_MTF)
+i_mtfHMALen = input.int(50, "MTF Trend HMA", tooltip="The HMA used to detect trend on other timeframes. We check its slope.", group=G_MTF)
+
+var G_DIV = "--- 3. Divergence Engine (Point #4) ---"
+i_rsiLen = input.int(14, "RSI Length", group=G_DIV)
+i_divLookbackL = input.int(5, "Divergence Left Lookback", group=G_DIV, tooltip="Shorter lookback for finding pivots.")
+i_divLookbackR = input.int(5, "Divergence Right Lookback", group=G_DIV, tooltip="Shorter lookback for finding pivots.")
+
+
+var G_EXIT = "--- 4. Exit (Risk) ---"
+i_atrLen    = input.int(14, "ATR Length", group=G_EXIT)
+i_stopMult  = input.float(2.0, "ATR Stop Multiplier", step=0.1, group=G_EXIT)
+
+
+// ---
+// MODULE 3: HMA RAINBOW (Current Timeframe)
+// ---
+
+// Calculate all HMAs for the current chart's timeframe
+float hma1 = ta.hma(close, i_hmaLen1)
+float hma2 = ta.hma(close, i_hmaLen2)
+float hma3 = ta.hma(close, i_hmaLen3)
+float hma4 = ta.hma(close, i_hmaLen4)
+float hma5 = ta.hma(close, i_hmaLen5)
+
+// Plot the rainbow
+plot(hma1, title="HMA 1", color=color.new(color.gray, 0), linewidth=2)
+plot(hma2, title="HMA 2", color=color.new(color.yellow, 0), linewidth=2)
+plot(hma3, title="HMA 3", color=color.new(color.orange, 0), linewidth=2)
+plot(hma4, title="HMA 4", color=color.new(color.red, 0), linewidth=2)
+plot(hma5, title="HMA 5", color=color.new(color.maroon, 0), linewidth=3)
+
+
+// ---
+// MODULE 4: MTF TREND ANALYSIS ENGINE (Point #3)
+// ---
+
+// This function gets the HMA from another timeframe and checks its slope.
+f_getMtfTrend(string tf, int len) =>
+    float mtfHMA = request.security(syminfo.tickerid, tf, ta.hma(close, len))
+    float mtfHMASlope = mtfHMA - mtfHMA[1]
+    string trendState = mtfHMASlope > 0 ? "UP" : mtfHMASlope < 0 ? "DOWN" : "FLAT"
+    color trendColor = mtfHMASlope > 0 ? color.new(color.green, 0) : mtfHMASlope < 0 ? color.new(color.red, 0) : color.new(color.gray, 0)
+    [trendState, trendColor]
+
+// Get the trend for all 6 timeframes
+[trend1, color1] = f_getMtfTrend(i_tf1, i_mtfHMALen)
+[trend2, color2] = f_getMtfTrend(i_tf2, i_mtfHMALen)
+[trend3, color3] = f_getMtfTrend(i_tf3, i_mtfHMALen)
+[trend4, color4] = f_getMtfTrend(i_tf4, i_mtfHMALen)
+[trend5, color5] = f_getMtfTrend(i_tf5, i_mtfHMALen)
+[trend6, color6] = f_getMtfTrend(i_tf6, i_mtfHMALen)
+
+
+// ---
+// MODULE 5: DIVERGENCE ENGINE (Point #4) (v3.4 COMPILER FIX)
+// ---
+
+// This module finds divergence. It is now correctly architected.
+f_findDivergence(float src, float osc, int l, int r) =>
+    // Find the price of the *current* pivots
+    float pivotHighPrice = ta.pivothigh(src, l, r)
+    float pivotLowPrice = ta.pivotlow(src, l, r)
+    
+    // Find the oscillator value *at* the *current* pivots
+    float pivotHighOsc = ta.pivothigh(osc, l, r)
+    float pivotLowOsc = ta.pivotlow(osc, l, r)
+
+    bool foundBearishDiv = false
+    bool foundBullishDiv = false
+
+    // Check for Bearish Divergence
+    if (not na(pivotHighPrice))
+        // A new price pivot high was just found.
+        // Get the value of the *previous* price pivot.
+        float prevPivotHighPrice = ta.pivothigh(src, l, r)[1]
+        // Get the value of the *previous* oscillator pivot.
+        float prevPivotHighOsc = ta.pivothigh(osc, l, r)[1]
+
+        // Check for REGULAR BEARISH DIVERGENCE
+        // Price made a HIGHER high, but Oscillator made a LOWER high.
+        if (pivotHighPrice > prevPivotHighPrice and pivotHighOsc < prevPivotHighOsc)
+            foundBearishDiv := true
+
+    // Check for Bullish Divergence
+    if (not na(pivotLowPrice))
+        // A new price pivot low was just found.
+        // Get the value of the *previous* price pivot.
+        float prevPivotLowPrice = ta.pivotlow(src, l, r)[1]
+        // Get the value of the *previous* oscillator pivot.
+        float prevPivotLowOsc = ta.pivotlow(osc, l, r)[1]
+        
+        // Check for REGULAR BULLISH DIVERGENCE
+        // Price made a LOWER low, but Oscillator made a HIGHER low.
+        if (pivotLowPrice < prevPivotLowPrice and pivotLowOsc > prevPivotLowOsc)
+            foundBullishDiv := true
+    
+    [foundBearishDiv, foundBullishDiv]
+
+// Calculate RSI and check for divergence
+float rsi = ta.rsi(close, i_rsiLen)
+[foundBearDiv, foundBullDiv] = f_findDivergence(close, rsi, i_divLookbackL, i_divLookbackR)
+
+// ---
+// MODULE 6: THE DASHBOARD (CORE OF v3.0) (v3.4 RUNTIME FIX)
+// ---
+// v3.4 FIX: Initialized table with 5 rows instead of 2.
+var table g_mftTable = table.new(position.top_right, 7, 5, border_width=1)
+
+f_updateTable() =>
+    // Row 0: Title
+    table.cell(g_mftTable, 0, 0, "ORYENS FRACTAL ENGINE v3.5", bgcolor=color.new(color.black, 0), text_color=color.white, width=10)
+    
+    // Row 1: Headers
+    table.cell(g_mftTable, 0, 1, "TIMEFRAME", bgcolor=color.new(color.gray, 70), text_color=color.white)
+    table.cell(g_mftTable, 1, 1, "TREND", bgcolor=color.new(color.gray, 70), text_color=color.white)
+    table.cell(g_mftTable, 2, 1, "TF", bgcolor=color.new(color.gray, 70), text_color=color.white)
+    table.cell(g_mftTable, 3, 1, "TREND", bgcolor=color.new(color.gray, 70), text_color=color.white)
+    table.cell(g_mftTable, 4, 1, "TF", bgcolor=color.new(color.gray, 70), text_color=color.white)
+    table.cell(g_mftTable, 5, 1, "TREND", bgcolor=color.new(color.gray, 70), text_color=color.white)
+
+    // Row 2: W, 4H, 10m
+    table.cell(g_mftTable, 0, 2, i_tf6, bgcolor=color.new(color.black, 0), text_color=color.white)
+    table.cell(g_mftTable, 1, 2, trend6, bgcolor=color6, text_color=color.white)
+    table.cell(g_mftTable, 2, 2, i_tf4, bgcolor=color.new(color.black, 0), text_color=color.white)
+    table.cell(g_mftTable, 3, 2, trend4, bgcolor=color4, text_color=color.white)
+    table.cell(g_mftTable, 4, 2, i_tf2, bgcolor=color.new(color.black, 0), text_color=color.white)
+    table.cell(g_mftTable, 5, 2, trend2, bgcolor=color2, text_color=color.white)
+    
+    // Row 3: D, 1H, 1m
+    table.cell(g_mftTable, 0, 3, i_tf5, bgcolor=color.new(color.black, 0), text_color=color.white)
+    table.cell(g_mftTable, 1, 3, trend5, bgcolor=color5, text_color=color.white)
+    table.cell(g_mftTable, 2, 3, i_tf3, bgcolor=color.new(color.black, 0), text_color=color.white)
+    table.cell(g_mftTable, 3, 3, trend3, bgcolor=color3, text_color=color.white)
+    table.cell(g_mftTable, 4, 3, i_tf1, bgcolor=color.new(color.black, 0), text_color=color.white)
+    table.cell(g_mftTable, 5, 3, trend1, bgcolor=color1, text_color=color.white)
+    
+    // Row 4: Status
+    table.cell(g_mftTable, 0, 4, "STATUS", bgcolor=color.new(color.black, 0), text_color=color.white)
+    table.cell(g_mftTable, 1, 4, "Bearish Div", bgcolor=foundBearDiv ? color.red : color.new(color.gray, 80), text_color=color.white, width=2)
+    table.cell(g_mftTable, 2, 4, "Bullish Div", bgcolor=foundBullDiv ? color.green : color.new(color.gray, 80), text_color=color.white, width=3)
+
+if (barstate.islast)
+    f_updateTable()
+
+// ---
+// MODULE 7: STRATEGY EXECUTION & RISK (v3.5)
+// ---
+
+// --- 7a. Define Overall Strategy Bias (Point #6) ---
+bool isLongOnlyMode = (trend6 == "UP" or trend5 == "UP")
+bool isShortOnlyMode = (trend6 == "DOWN" or trend5 == "DOWN")
+
+// --- 7b. Define Current Timeframe "Buy The Dip" Signals (v3.5) ---
+// This is the "stretch buy target" logic from Point #5.
+// We look for a pullback (hma1 < hma3) and then buy the recovery.
+bool buySignal = isLongOnlyMode and ta.crossover(hma1, hma3) and (not foundBearDiv)
+bool sellSignal = isShortOnlyMode and ta.crossunder(hma1, hma3) and (not foundBullDiv)
+
+// --- 7c. Risk Management (Trailing Stop) ---
+var float stopLossLevel = na
+float atrValue = ta.atr(i_atrLen)
+bool inLongTrade  = strategy.position_size > 0
+bool inShortTrade = strategy.position_size < 0
+bool notInTrade   = strategy.position_size == 0
+bool justEnteredLong  = inLongTrade and strategy.position_size[1] <= 0
+bool justEnteredShort = inShortTrade and strategy.position_size[1] >= 0
+bool justClosedTrade  = notInTrade and strategy.position_size[1] != 0
+
+if (justEnteredLong)
+    stopLossLevel := close - (atrValue * i_stopMult)
+if (justEnteredShort)
+    stopLossLevel := close + (atrValue * i_stopMult)
+
+if (inLongTrade)
+    float newStop = close - (atrValue * i_stopMult)
+    stopLossLevel := math.max(stopLossLevel, newStop)
+if (inShortTrade)
+    float newStop = close + (atrValue * i_stopMult)
+    stopLossLevel := math.min(stopLossLevel, newStop)
+
+if (justClosedTrade)
+    stopLossLevel := na
+
+// --- 7d. Execution Logic (v3.5 - Pyramiding Enabled) ---
+// We no longer check `if (notInTrade)` so that we can pyramid.
+if (isLongOnlyMode and buySignal)
+    strategy.entry(id="Long", direction=strategy.long)
+if (isShortOnlyMode and sellSignal)
+    strategy.entry(id="Short", direction=strategy.short)
+
+// --- 7e. Exit Logic (v3.5 - WHIPSAW FIX) ---
+// We have REMOVED the `strategy.close()` calls.
+// The *only* exit is the trailing stop, per Point #6.
+if (inLongTrade)
+    strategy.exit(id="Long SL/Exit", from_entry="Long", stop=stopLossLevel)
+
+if (inShortTrade)
+    strategy.exit(id="Short SL/Exit", from_entry="Short", stop=stopLossLevel)
+
+// ---
+// MODULE 8: VISUALIZATION (Strategy Safe)
+// ---
+// We use `plotshape` to show *when* the strategy's logic
+// detected a divergence. This is safe for backtesting.
+plotshape(series=foundBearDiv, title="Bearish Divergence Signal", style=shape.triangledown, location=location.abovebar, color=color.new(color.red, 20), size=size.small)
+plotshape(series=foundBullDiv, title="Bullish Divergence Signal", style=shape.triangleup, location=location.belowbar, color=color.new(color.green, 20), size=size.small)
+
+// v3.5: Plot the entry signals
+plotshape(series=buySignal, title="Buy Entry Signal", style=shape.labelup, location=location.belowbar, color=color.new(color.green, 0), text="BUY", textcolor=color.white, size=size.tiny)
+plotshape(series=sellSignal, title="Sell Entry Signal", style=shape.labeldown, location=location.abovebar, color=color.new(color.red, 0), text="SELL", textcolor=color.white, size=size.tiny)
+
