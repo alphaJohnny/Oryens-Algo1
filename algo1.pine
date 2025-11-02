@@ -1,7 +1,7 @@
 // @version=5
 // ---
 // Oryens Capital - Modular Strategy Framework v2.1.1
-//
+// First minorly profitable strategy
 // v2.1.1: HOTFIX
 //       - Fixed compiler bug "Undeclared identifier 'color'"
 //         by switching all plotting functions (plot, plotshape,
