@@ -1,0 +1,170 @@
+// @version=5
+// ---
+// Oryens Capital - Modular Strategy Framework v1.7
+//
+// This script is a complete, modular framework for a trend-following
+// strategy. It is designed for clarity, maintainability, and
+// "plug-and-play" logic, per your engineering requirements.
+//
+// v1.7: CATASTROPHIC BUG FIX
+//       - The 'stopLossLevel' and 'takeProfitLevel' variables were
+//         never being reset after the first trade due to a
+//         flawed 'if (notInTrade)' check inside an 'else' block.
+//       - This caused all subsequent trades to use stale data,
+//         likely resulting in immediate, invisible exits.
+//       - The logic in Module 5 has been rebuilt to be robust.
+//       - Per user feedback, Module 6 'plotshape' now only fires
+//         on an actual trade entry, not just a signal.
+//
+// STRATEGY LOGIC: (REVISED AND FUNCTIONAL)
+// 1. REGIME FILTER: 200-period EMA.
+// 2. ENTRY SIGNAL: MACD Crossover (Regime-filtered).
+// 3. EXIT SIGNAL (TWO CONDITIONS):
+//    - A) SIGNAL REVERSAL: MACD crosses back over the signal line.
+//    - B) RISK MANAGEMENT: An ATR-based Stop Loss or Take Profit is hit.
+// ---
+
+// ---
+// MODULE 1: STRATEGY CONFIGURATION
+// ---
+strategy("Oryens - Modular Trend Strategy v1.7 (Logic Fix)",
+     overlay=true,
+     initial_capital=100000,
+     default_qty_type=strategy.percent_of_equity,
+     default_qty_value=10, // Uses 10% of equity per trade
+     commission_type=strategy.commission.percent,
+     commission_value=0.04, // Simulates 0.04% exchange fees
+     pyramiding=0, // No pyramiding for this first version
+     calc_on_every_tick=true
+     )
+
+// ---
+// MODULE 2: INPUTS
+// ---
+var G_INPUTS = "--- Strategy Inputs ---"
+i_emaLen    = input.int(200, "Regime Filter (EMA)", group=G_INPUTS)
+i_macdFast  = input.int(12, "MACD Fast", group=G_INPUTS)
+i_macdSlow  = input.int(26, "MACD Slow", group=G_INPUTS)
+i_signalLen = input.int(9, "MACD Signal", group=G_INPUTS)
+i_atrLen    = input.int(14, "ATR Length", group=G_INPUTS)
+i_stopMult  = input.float(2.0, "ATR Stop Multiplier", step=0.1, group=G_INPUTS)
+i_tpMult    = input.float(4.0, "ATR T/P Multiplier", step=0.1, group=G_INPUTS)
+
+// ---
+// MODULE 3: INDICATOR CALCULATIONS
+// ---
+f_getIndicators() =>
+    float emaFilter = ta.ema(close, i_emaLen)
+    [macd, signal, _] = ta.macd(close, i_macdFast, i_macdSlow, i_signalLen)
+    float atr = ta.atr(i_atrLen)
+    [emaFilter, macd, signal, atr]
+
+[regimeEMA, macdLine, signalLine, atrValue] = f_getIndicators()
+
+
+// ---
+// MODULE 4: SIGNAL LOGIC
+// ---
+f_getSignals(ema, macd, signal) =>
+    bool isBullRegime = close > ema
+    bool isBearRegime = close < ema
+    bool macdCrossUp = ta.crossover(macd, signal)
+    bool macdCrossDown = ta.crossunder(macd, signal)
+
+    bool enterLong  = isBullRegime and macdCrossUp
+    bool enterShort = isBearRegime and macdCrossDown
+    bool exitLongSignal   = macdCrossDown
+    bool exitShortSignal  = macdCrossUp
+    
+    [enterLong, exitLongSignal, enterShort, exitShortSignal, isBullRegime]
+
+[buySignal, exitBuySignal, sellSignal, exitSellSignal, isBullRegime] = f_getSignals(regimeEMA, macdLine, signalLine)
+
+
+// ---
+// MODULE 5: RISK MANAGEMENT & EXECUTION (REBUILT)
+// This module now correctly resets SL/TP levels.
+// ---
+
+// We use 'var' to declare variables that *persist* between bars.
+var float stopLossLevel   = na
+var float takeProfitLevel = na
+
+// Get current trade state
+bool inLongTrade  = strategy.position_size > 0
+bool inShortTrade = strategy.position_size < 0
+bool notInTrade   = strategy.position_size == 0
+
+// === 1. DETECT STATE CHANGES ===
+// These booleans are true for *one tick only*
+bool justEnteredLong  = inLongTrade and strategy.position_size[1] <= 0
+bool justEnteredShort = inShortTrade and strategy.position_size[1] >= 0
+bool justClosedTrade  = notInTrade and strategy.position_size[1] != 0
+
+// === 2. RESET LEVELS ON EXIT ===
+// If we *just* closed a trade, reset the SL/TP variables to 'na'
+// This was the source of the catastrophic bug.
+if (justClosedTrade)
+    stopLossLevel   := na
+    takeProfitLevel := na
+
+// === 3. CALCULATE & STORE LEVELS ON ENTRY ===
+// If we *just* entered a trade, calculate and store the new SL/TP
+if (justEnteredLong)
+    stopLossLevel   := close - (atrValue * i_stopMult)
+    takeProfitLevel := close + (atrValue * i_tpMult)
+
+if (justEnteredShort)
+    stopLossLevel   := close + (atrValue * i_stopMult)
+    takeProfitLevel := close - (atrValue * i_tpMult)
+
+// === 4. ENTRY LOGIC ===
+// We only check for entries if we are flat (notInTrade).
+if (notInTrade)
+    if (buySignal)
+        strategy.entry("Long", strategy.long) // SL/TP levels will be set on next tick
+
+    if (sellSignal)
+        strategy.entry("Short", strategy.short) // SL/TP levels will be set on next tick
+
+// === 5. EXIT LOGIC ===
+// This logic runs on *every bar* while a trade is open.
+
+// A. Signal-Based Exit (MACD Crossover Reversal)
+if (inLongTrade and exitBuySignal)
+    strategy.close("Long", comment="Exit (Signal)")
+
+if (inShortTrade and exitSellSignal)
+    strategy.close("Short", comment="Exit (Signal)")
+
+// B. Risk-Based Exit (ATR Stop Loss or Take Profit)
+// We place this exit order on *every bar* the trade is open,
+// using the SL/TP levels we stored in our 'var' variables.
+// This is now safe because the levels are correctly calculated.
+if (inLongTrade)
+    strategy.exit("Long SL/TP", "Long", stop=stopLossLevel, limit=takeProfitLevel)
+
+if (inShortTrade)
+    strategy.exit("Short SL/TP", "Short", stop=stopLossLevel, limit=takeProfitLevel)
+
+
+// ---
+// MODULE 6: VISUALIZATION (REVISED)
+// ---
+
+// Plot the Regime Filter
+plot(regimeEMA, "Regime EMA", color.new(color.white, 50), 2)
+
+// Change background color based on the regime
+bgcolor(isBullRegime ? color.new(color.blue, 90) : color.new(color.red, 90))
+
+// Plot Buy/Sell signals
+// v1.7: Per user request, plotshape only fires on *actual trade entry*
+// using the 'justEnteredLong/Short' variables from Module 5.
+plotshape(justEnteredLong, "Long Entry", shape.labelup, location.belowbar, color.new(color.green, 0), size=size.small, text="BUY")
+plotshape(justEnteredShort, "Short Entry", shape.labeldown, location.abovebar, color.new(color.red, 0), size=size.small, text="SELL")
+
+// Plot the SL and TP levels on the chart *while in a trade*
+plot(inLongTrade or inShortTrade ? stopLossLevel : na, "Stop Loss", color.new(color.red, 0), 2, plot.style_linebr)
+plot(inLongTrade or inShortTrade ? takeProfitLevel : na, "Take Profit", color.new(color.green, 0), 2, plot.style_linebr)
+
