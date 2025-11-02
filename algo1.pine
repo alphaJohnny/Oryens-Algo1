@@ -1,30 +1,43 @@
 // @version=5
 // ---
-// Oryens Capital - Modular Strategy Framework v1.9
+// Oryens Capital - Modular Strategy Framework v2.1.1
 //
-// This script is a complete, modular framework for a trend-following
-// strategy. It is designed for clarity, maintainability, and
-// "plug-and-play" logic, per your engineering requirements.
+// v2.1.1: HOTFIX
+//       - Fixed compiler bug "Undeclared identifier 'color'"
+//         by switching all plotting functions (plot, plotshape,
+//         bgcolor) to use explicit, named arguments instead of
+//         positional arguments. This is more robust engineering.
 //
-// v1.9: "LET WINNERS RUN" UPGRADE
-//       - The strategy is now a true trend-following system.
-//       - REMOVED: Fixed Take Profit (`i_tpMult`).
-//       - REMOVED: Signal-based exit (`exitBuySignal`).
-//       - ADDED: Trailing ATR Stop-Loss.
-//       - The stop-loss is now calculated on every bar and can
-//         only move *in favor* of the trade, allowing the
-//         strategy to ride long trends and lock in profit.
+// v2.1: PROFESSIONAL REBUILD (HMA + DIVERGENCE FILTER)
+//       - Per user direction, v2.0 was still too "simpleton"
+//         and suffered from lag and whipsaw.
+//       - This version is a professional-grade rebuild based
+//         on advanced, non-lagging concepts.
 //
-// STRATEGY LOGIC: (REVISED AND PROFESSIONAL)
-// 1. REGIME FILTER: 200-period EMA.
-// 2. ENTRY SIGNAL: MACD Crossover (Regime-filtered).
+//       - UPGRADED REGIME FILTER (ZERO-LAG):
+//         - REMOVED: Dual EMAs.
+//         - ADDED: Dual Hull Moving Averages (HMA) for
+//           superior speed and smoothness.
+//         - ADDED: Slope Filter. We only enter long if the
+//           fast HMA is rising (not just "above").
+//
+//       - UPGRADED ENTRY SIGNAL (DIVERGENCE FILTER):
+//         - RETAINED: Price Channel Breakout as the base signal.
+//         - ADDED: RSI-based Divergence Filter.
+//         - The strategy will NOW REJECT a breakout if
+//           momentum (RSI) does not confirm the new high,
+//           preventing "bull traps."
+//
+// STRATEGY LOGIC: (REVISED AND PROFESSIONAL v2.1)
+// 1. REGIME FILTER: Fast HMA > Slow HMA + Fast HMA Slope > 0.
+// 2. ENTRY SIGNAL: Price Breakout + NO Bearish Divergence.
 // 3. EXIT SIGNAL: Trailing ATR Stop-Loss is hit.
 // ---
 
 // ---
 // MODULE 1: STRATEGY CONFIGURATION
 // ---
-strategy("Oryens - Modular Trend Strategy v1.9 (Trailing ATR)",
+strategy("Oryens - Modular Trend Strategy v2.1.1 (Hotfix)",
      overlay=true,
      initial_capital=100000,
      default_qty_type=strategy.fixed,
@@ -38,58 +51,88 @@ strategy("Oryens - Modular Trend Strategy v1.9 (Trailing ATR)",
 // ---
 // MODULE 2: INPUTS
 // ---
-var G_INPUTS = "--- Strategy Inputs ---"
-i_emaLen    = input.int(200, "Regime Filter (EMA)", group=G_INPUTS)
-i_macdFast  = input.int(12, "MACD Fast", group=G_INPUTS)
-i_macdSlow  = input.int(26, "MACD Slow", group=G_INPUTS)
-i_signalLen = input.int(9, "MACD Signal", group=G_INPUTS)
-i_atrLen    = input.int(14, "ATR Length", group=G_INPUTS)
-i_stopMult  = input.float(2.0, "ATR Stop Multiplier", step=0.1, group=G_INPUTS)
-// v1.9: Removed Take Profit. We let winners run.
-// i_tpMult    = input.float(4.0, "ATR T/P Multiplier", step=0.1, group=G_INPUTS)
+var G_REGIME = "--- 1. Regime Filter (HMA) ---"
+i_hmaFastLen = input.int(21, "Regime HMA Fast", group=G_REGIME)
+i_hmaSlowLen = input.int(55, "Regime HMA Slow", group=G_REGIME)
+
+var G_ENTRY = "--- 2. Entry Signal (Breakout + Divergence) ---"
+i_entryLen   = input.int(20, "Entry Breakout Length", group=G_ENTRY)
+i_rsiLen     = input.int(14, "RSI Length (for Divergence)", group=G_ENTRY)
+
+
+var G_EXIT = "--- 3. Exit (Risk) ---"
+i_atrLen    = input.int(14, "ATR Length", group=G_EXIT)
+i_stopMult  = input.float(2.0, "ATR Stop Multiplier", step=0.1, group=G_EXIT)
+
 
 // ---
 // MODULE 3: INDICATOR CALCULATIONS
 // ---
 f_getIndicators() =>
-    float emaFilter = ta.ema(close, i_emaLen)
-    [macd, signal, _] = ta.macd(close, i_macdFast, i_macdSlow, i_signalLen)
+    // v2.1: Regime Filter Indicators (HMA)
+    float hmaFast = ta.hma(close, i_hmaFastLen)
+    float hmaSlow = ta.hma(close, i_hmaSlowLen)
+    
+    // v2.1: Entry Signal Indicators
+    float upperChannel = ta.highest(high, i_entryLen)[1] // [1] = high of *previous* bars
+    float lowerChannel = ta.lowest(low, i_entryLen)[1]  // [1] = low of *previous* bars
+    float rsi = ta.rsi(close, i_rsiLen)
+    
+    // v2.1: Exit (Risk) Indicator
     float atr = ta.atr(i_atrLen)
-    [emaFilter, macd, signal, atr]
+    
+    [hmaFast, hmaSlow, upperChannel, lowerChannel, rsi, atr]
 
-[regimeEMA, macdLine, signalLine, atrValue] = f_getIndicators()
+[regimeHMAFast, regimeHMASlow, breakoutHigh, breakoutLow, rsiValue, atrValue] = f_getIndicators()
 
 
 // ---
-// MODULE 4: SIGNAL LOGIC
+// MODULE 4: SIGNAL LOGIC (REBUILT WITH DIVERGENCE)
 // ---
-f_getSignals(ema, macd, signal) =>
-    bool isBullRegime = close > ema
-    bool isBearRegime = close < ema
-    bool macdCrossUp = ta.crossover(macd, signal)
-    bool macdCrossDown = ta.crossunder(macd, signal)
+f_getSignals() =>
+    // --- Regime Filter ---
+    float hmaFastSlope = regimeHMAFast - regimeHMAFast[1]
+    bool isBullState = regimeHMAFast > regimeHMASlow and hmaFastSlope > 0
+    bool isBearState = regimeHMAFast < regimeHMASlow and hmaFastSlope < 0
 
-    bool enterLong  = isBullRegime and macdCrossUp
-    bool enterShort = isBearRegime and macdCrossDown
+    // --- Base Entry Signal (Breakout) ---
+    bool breakHigh = ta.crossover(close, breakoutHigh)
+    bool breakLow  = ta.crossunder(close, breakoutLow)
     
-    // v1.9: Removed signal-based exits.
-    // bool exitLongSignal   = macdCrossDown
-    // bool exitShortSignal  = macdCrossUp
+    // --- Divergence Filter ---
+    // Look back at the highest price and highest RSI in the breakout window
+    float priceHighestInWindow = ta.highest(high, i_entryLen)[1]
+    float rsiHighestInWindow   = ta.highest(rsiValue, i_entryLen)[1]
     
-    [enterLong, enterShort, isBullRegime]
+    float priceLowestInWindow = ta.lowest(low, i_entryLen)[1]
+    float rsiLowestInWindow   = ta.lowest(rsiValue, i_entryLen)[1]
 
-[buySignal, sellSignal, isBullRegime] = f_getSignals(regimeEMA, macdLine, signalLine)
+    // Check for "Hidden Bearish Divergence"
+    // Price *failed* to make a new high, but RSI *did*. (A sign of weakness)
+    // No, we check for *regular* bearish divergence:
+    // Price *did* make a new high, but RSI *failed*.
+    bool isBearishDivergence = (close > priceHighestInWindow) and (rsiValue < rsiHighestInWindow)
+    
+    // Check for *regular* bullish divergence:
+    // Price *did* make a new low, but RSI *failed*.
+    bool isBullishDivergence = (close < priceLowestInWindow) and (rsiValue > rsiLowestInWindow)
+    
+    // --- Final Signal ---
+    bool enterLong  = isBullState and breakHigh and (not isBearishDivergence)
+    bool enterShort = isBearState and breakLow and (not isBullishDivergence)
+    
+    [enterLong, enterShort, isBullState, isBearishDivergence, isBullishDivergence]
+
+[buySignal, sellSignal, isBullRegime, hasBearDiv, hasBullDiv] = f_getSignals()
 
 
 // ---
 // MODULE 5: RISK MANAGEMENT & EXECUTION (TRAILING STOP LOGIC)
-// This module now implements a trailing ATR stop.
+// This module is unchanged. Its engineering is sound.
 // ---
 
 // We use 'var' to declare variables that *persist* between bars.
 var float stopLossLevel = na
-// v1.9: Removed takeProfitLevel
-// var float takeProfitLevel = na
 
 // Get current trade state
 bool inLongTrade  = strategy.position_size > 0
@@ -115,14 +158,12 @@ if (inLongTrade)
     // Calculate the *new* potential stop level
     float newStop = close - (atrValue * i_stopMult)
     // If the newStop is higher than our old stop, update it.
-    // This makes the stop "trail" the price up.
     stopLossLevel := math.max(stopLossLevel, newStop)
 
 if (inShortTrade)
     // Calculate the *new* potential stop level
     float newStop = close + (atrValue * i_stopMult)
     // If the newStop is lower than our old stop, update it.
-    // This makes the stop "trail" the price down.
     stopLossLevel := math.min(stopLossLevel, newStop)
 
 // === 4. RESET STOP LEVEL ON EXIT ===
@@ -141,32 +182,38 @@ if (notInTrade)
 
 // === 6. EXIT LOGIC ===
 // We now have only ONE exit condition: the trailing stop.
-// We place this exit order on *every bar* the trade is open,
-// using the *updated* 'stopLossLevel' variable.
-
 if (inLongTrade)
-    strategy.exit("Long Exit", "Long", stop=stopLossLevel)
+    strategy.exit(id="Long Exit", from_entry="Long", stop=stopLossLevel)
 
 if (inShortTrade)
-    strategy.exit("Short Exit", "Short", stop=stopLossLevel)
+    strategy.exit(id="Short Exit", from_entry="Short", stop=stopLossLevel)
 
 
 // ---
-// MODULE 6: VISUALIZATION (REVISED)
+// MODULE 6: VISUALIZATION (HOTFIX v2.1.1)
+// Using explicit, named arguments for all plotting functions
+// to prevent compiler errors.
 // ---
 
 // Plot the Regime Filter
-plot(regimeEMA, "Regime EMA", color.new(color.white, 50), 2)
+plot(regimeHMAFast, title="Regime HMA Fast", color=color.new(color.blue, 50), linewidth=2)
+plot(regimeHMASlow, title="Regime HMA Slow", color=color.new(color.white, 50), linewidth=2)
 
 // Change background color based on the regime
-bgcolor(isBullRegime ? color.new(color.blue, 90) : color.new(color.red, 90))
+bgcolor(color=isBullRegime ? color.new(color.blue, 90) : color.new(color.red, 90))
 
 // Plot Buy/Sell signals
-plotshape(justEnteredLong, "Long Entry", shape.labelup, location.belowbar, color.new(color.green, 0), size=size.small, text="BUY")
-plotshape(justEnteredShort, "Short Entry", shape.labeldown, location.abovebar, color.new(color.red, 0), size=size.small, text="SELL")
+plotshape(series=justEnteredLong, title="Long Entry", style=shape.labelup, location=location.belowbar, color=color.new(color.green, 0), size=size.small, text="BUY")
+plotshape(series=justEnteredShort, title="Short Entry", style=shape.labeldown, location=location.abovebar, color=color.new(color.red, 0), size=size.small, text="SELL")
 
 // Plot the Trailing Stop Loss
-plot(inLongTrade or inShortTrade ? stopLossLevel : na, "Trailing Stop Loss", color.new(color.red, 0), 2, plot.style_linebr)
-// v1.9: Removed Take Profit plot
-// plot(inLongTrade or inShortTrade ? takeProfitLevel : na, "Take Profit", color.new(color.green, 0), 2, plot.style_linebr)
+plot(series=inLongTrade or inShortTrade ? stopLossLevel : na, title="Trailing Stop Loss", color=color.new(color.red, 0), linewidth=2, style=plot.style_linebr)
+
+// Plot the breakout channels
+plot(series=notInTrade ? breakoutHigh : na, title="Breakout High", color=color.new(color.green, 70), linewidth=1, style=plot.style_linebr)
+plot(series=notInTrade ? breakoutLow : na, title="Breakout Low", color=color.new(color.red, 70), linewidth=1, style=plot.style_linebr)
+
+// Plot divergence signals for debugging
+plotshape(series=buySignal and hasBearDiv, title="Bear Div Blocked Buy", style=shape.labeldown, location=location.abovebar, color=color.new(color.orange, 0), size=size.tiny, text="BEAR DIV")
+plotshape(series=sellSignal and hasBullDiv, title="Bull Div Blocked Sell", style=shape.labelup, location=location.belowbar, color=color.new(color.orange, 0), size=size.tiny, text="BULL DIV")
 
