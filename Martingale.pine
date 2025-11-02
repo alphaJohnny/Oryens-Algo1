@@ -1,0 +1,153 @@
+// ─────────────────────────────────────────────────────────────────────────────
+//  Oryens – Modular Trend Strategy v4.3  (Pine Script v6)
+//  Fixed & upgraded – Martingale + Divergence + HMA + Weekly filter
+// ─────────────────────────────────────────────────────────────────────────────
+// @version=6
+strategy("Oryens v4.3 – Martingale Testbed",overlay=true,pyramiding=5,default_qty_type=strategy.fixed,default_qty_value=1,initial_capital=100000,commission_type=strategy.commission.percent,commission_value=0.04,calc_on_every_tick=true)
+
+// ────────────────────── 1. INPUTS ──────────────────────
+var G_HMA = "--- 1. HMA Rainbow ---"
+i_hmaLen1 = input.int(4,"HMA 1 (Fastest/Price)",group=G_HMA)
+i_hmaLen2 = input.int(12,"HMA 2",group=G_HMA)
+i_hmaLen3 = input.int(35,"HMA 3 (Medium)",group=G_HMA)
+i_hmaLen4 = input.int(50,"HMA 4",group=G_HMA)
+i_hmaLen5 = input.int(100,"HMA 5 (Slowest)",group=G_HMA)
+
+var G_DIV = "--- 2. Divergence Engine ---"
+i_rsiLen       = input.int(14,"RSI Length",group=G_DIV)
+i_cciLen       = input.int(20,"CCI Length",group=G_DIV)
+i_macdFast     = input.int(12,"MACD Fast",group=G_DIV)
+i_macdSlow     = input.int(26,"MACD Slow",group=G_DIV)
+i_macdSig      = input.int(9,"MACD Signal",group=G_DIV)
+i_divLookbackL = input.int(5,"Divergence Left",group=G_DIV)
+i_divLookbackR = input.int(5,"Divergence Right",group=G_DIV)
+
+var G_RISK = "--- 3. Risk & Martingale ---"
+i_initialRiskPct  = input.float(2.0,"Initial Risk %",step=0.1,group=G_RISK)
+i_profitTargetPct = input.float(10.0,"Profit Target % (Scaling)",step=0.1,group=G_RISK)
+i_atrLen          = input.int(14,"ATR Length",group=G_RISK)
+i_atrTrailMult    = input.float(3.0,"ATR Trailing Stop Multiplier",group=G_RISK)
+
+var G_MTF = "--- 4. Fractal Filter (Weekly) ---"
+i_tfWeekly  = input.timeframe("W","Weekly Trend TF",group=G_MTF)
+i_mtfHMALen = input.int(50,"Weekly Trend HMA",group=G_MTF)
+
+// ────────────────────── 2. HMA RAINBOW ──────────────────────
+hma1 = ta.hma(close,i_hmaLen1)
+hma2 = ta.hma(close,i_hmaLen2)
+hma3 = ta.hma(close,i_hmaLen3)
+hma4 = ta.hma(close,i_hmaLen4)
+hma5 = ta.hma(close,i_hmaLen5)
+plot(hma1,"HMA 1",color=color.gray,linewidth=2)
+plot(hma2,"HMA 2",color=color.yellow,linewidth=2)
+plot(hma3,"HMA 3",color=color.orange,linewidth=2)
+plot(hma4,"HMA 4",color=color.red,linewidth=2)
+plot(hma5,"HMA 5",color=color.maroon,linewidth=3)
+
+// ────────────────────── 3. WEEKLY TREND FILTER ──────────────────────
+f_getMtfTrend(string tf,int len)=> 
+    mtfHMA = request.security(syminfo.tickerid,tf,ta.hma(close,len))
+    slope  = mtfHMA - mtfHMA[1]
+    [slope>0,slope<0]
+
+[isWeeklyUp,isWeeklyDown] = f_getMtfTrend(i_tfWeekly,i_mtfHMALen)
+
+// ────────────────────── 4. DIVERGENCE ENGINE ──────────────────────
+f_findDivergence(float src,float osc,int l,int r)=> 
+    ph_price = ta.pivothigh(src,l,r)
+    pl_price = ta.pivotlow(src,l,r)
+    ph_osc   = ta.pivothigh(osc,l,r)
+    pl_osc   = ta.pivotlow(osc,l,r)
+    bearDiv = not na(ph_price) and not na(ph_price[1]) and ph_price>ph_price[1] and ph_osc<ph_osc[1]
+    bullDiv = not na(pl_price) and not na(pl_price[1]) and pl_price<pl_price[1] and pl_osc>pl_osc[1]
+    [bearDiv,bullDiv]
+
+rsi   = ta.rsi(close,i_rsiLen)
+cci   = ta.cci(close,i_cciLen)
+[macdLine,_,_] = ta.macd(close,i_macdFast,i_macdSlow,i_macdSig)
+
+[rsiBear,rsiBull] = f_findDivergence(close,rsi,i_divLookbackL,i_divLookbackR)
+[cciBear,cciBull] = f_findDivergence(close,cci,i_divLookbackL,i_divLookbackR)
+[macdBear,macdBull] = f_findDivergence(close,macdLine,i_divLookbackL,i_divLookbackR)
+
+buySignal  = (rsiBull or cciBull or macdBull) and isWeeklyUp
+sellSignal = (rsiBear or cciBear or macdBear) and isWeeklyDown
+
+// ────────────────────── 5. RISK & STATE ──────────────────────
+atr = ta.atr(i_atrLen)
+inLong  = strategy.position_size > 0
+inShort = strategy.position_size < 0
+inTrade = inLong or inShort
+tradeCount = strategy.opentrades
+riskAmount  = strategy.equity * i_initialRiskPct / 100
+riskPerUnit = atr * syminfo.pointvalue
+initialQty  = math.max(1,riskAmount / riskPerUnit)
+
+var float baseQty          = na
+var float profitTargetPrice = na
+var float trailingStopLevel = na
+
+// ────────────────────── 6. ENTRY LOGIC ──────────────────────
+if not inTrade
+    if buySignal
+        baseQty := initialQty
+        strategy.entry("Long Initial",strategy.long,qty=baseQty)
+    if sellSignal
+        baseQty := initialQty
+        strategy.entry("Short Initial",strategy.short,qty=baseQty)
+
+// ────────────────────── 7. MARTINGALE ADDS ──────────────────────
+else if inLong and strategy.position_avg_price > close
+    if buySignal and tradeCount < 4
+        mult = tradeCount==1?2:tradeCount==2?3:4
+        qty  = baseQty * mult
+        id   = "Long MG "+str.tostring(mult)+"x"
+        strategy.entry(id,strategy.long,qty=qty)
+else if inShort and strategy.position_avg_price < close
+    if sellSignal and tradeCount < 4
+        mult = tradeCount==1?2:tradeCount==2?3:4
+        qty  = baseQty * mult
+        id   = "Short MG "+str.tostring(mult)+"x"
+        strategy.entry(id,strategy.short,qty=qty)
+
+// ────────────────────── 8. PROFIT SCALING & TRAILING ──────────────────────
+if inLong and strategy.position_avg_price < close
+    if na(profitTargetPrice)
+        profitTargetPrice := strategy.position_avg_price * (1 + i_profitTargetPct/100)
+    if not na(profitTargetPrice) and close >= profitTargetPrice
+        strategy.close("Long Initial",qty_percent=10,comment="Scale 10%")
+        if strategy.opentrades > 1
+            strategy.close(id="Long MG 2x",qty_percent=20,comment="Scale 20%")
+        if strategy.opentrades > 2
+            strategy.close(id="Long MG 3x",qty_percent=30,comment="Scale 30%")
+    newTrail = close - atr * i_atrTrailMult
+    trailingStopLevel := na(trailingStopLevel)?newTrail:math.max(trailingStopLevel,newTrail)
+    strategy.exit("Long Trail",from_entry="Long Initial",stop=trailingStopLevel)
+else if inShort and strategy.position_avg_price > close
+    if na(profitTargetPrice)
+        profitTargetPrice := strategy.position_avg_price * (1 - i_profitTargetPct/100)
+    if not na(profitTargetPrice) and close <= profitTargetPrice
+        strategy.close("Short Initial",qty_percent=10,comment="Scale 10%")
+        if strategy.opentrades > 1
+            strategy.close(id="Short MG 2x",qty_percent=20,comment="Scale 20%")
+        if strategy.opentrades > 2
+            strategy.close(id="Short MG 3x",qty_percent=30,comment="Scale 30%")
+    newTrail = close + atr * i_atrTrailMult
+    trailingStopLevel := na(trailingStopLevel)?newTrail:math.min(trailingStopLevel,newTrail)
+    strategy.exit("Short Trail",from_entry="Short Initial",stop=trailingStopLevel)
+
+// ────────────────────── 9. RESET STATE AFTER FULL EXIT ──────────────────────
+if not inTrade and strategy.opentrades[1] > 0
+    profitTargetPrice := na
+    trailingStopLevel := na
+    baseQty           := na
+
+// ────────────────────── 10. VISUALISATION ──────────────────────
+plotshape(buySignal and not inTrade,title="Initial BUY",style=shape.labelup,location=location.belowbar,color=color.new(color.green,0),text="BUY",textcolor=color.white,size=size.small)
+plotshape(sellSignal and not inTrade,title="Initial SELL",style=shape.labeldown,location=location.abovebar,color=color.new(color.red,0),text="SELL",textcolor=color.white,size=size.small)
+plotshape(buySignal and inLong and strategy.position_avg_price > close,title="Add LONG",style=shape.labelup,location=location.belowbar,color=color.new(color.maroon,0),text="ADD",textcolor=color.white,size=size.small)
+plotshape(sellSignal and inShort and strategy.position_avg_price < close,title="Add SHORT",style=shape.labeldown,location=location.abovebar,color=color.new(color.maroon,0),text="ADD",textcolor=color.white,size=size.small)
+
+plot(inLong and not na(profitTargetPrice)?profitTargetPrice:na,"Long Target",color=color.lime,style=plot.style_circles)
+plot(inShort and not na(profitTargetPrice)?profitTargetPrice:na,"Short Target",color=color.red,style=plot.style_circles)
+plot(trailingStopLevel,"Trailing Stop",color=color.fuchsia,linewidth=2,style=plot.style_linebr)
